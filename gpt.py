@@ -6,21 +6,21 @@ from torch.nn import functional as F
 # hyperparameters
 batch_size = 64 # how many independent sequences will we process in parallel?
 block_size = 256 # what is the maximum context length for predictions?
-max_iters = 5000
-eval_interval = 50
-learning_rate = 3e-4
-device = 'cuda' if torch.cuda.is_available() else 'mps'
-eval_iters = 200
-n_embd = 384
-n_head = 6
-n_layer = 6
-dropout = 0.2
+max_iters = 5000 # how many training iterations?
+eval_interval = 50 # how often to print the loss?
+learning_rate = 3e-4 # how quickly to learn?
+device = 'cuda' if torch.cuda.is_available() else 'mps' # MPS is the device for M1 Macs
+eval_iters = 200 # how many times to run the validation loop to estimate loss?
+n_embd = 384 # embedding dimensions
+n_head = 6 # number of attention heads
+n_layer = 6 # number of layers in the network
+dropout = 0.2 # dropout rate
 # ------------
 
-torch.manual_seed(1337)
+torch.manual_seed(1337) # for reproducibility
 
 # wget https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt
-with open('tiny-shakespeare.txt', 'r', encoding='utf-8') as f:
+with open('tiny-shakespeare.txt', 'r', encoding='utf-8') as f: # this is what i named the file
     text = f.read()
 
 # here are all the unique characters that occur in this text
@@ -51,15 +51,15 @@ def get_batch(split):
 @torch.no_grad()
 def estimate_loss():
     out = {}
-    model.eval()
+    model.eval() # turn on eval mode so we don't mess with batch stats
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
-        for k in range(eval_iters):
+        for k in range(eval_iters): # run eval_iters samples when estimating
             X, Y = get_batch(split)
-            logits, loss = model(X, Y)
+            logits, loss = model(X, Y) # run the model and record the loss
             losses[k] = loss.item()
         out[split] = losses.mean()
-    model.train()
+    model.train() # turn back on training mode
     return out
 
 class Head(nn.Module):
@@ -67,12 +67,12 @@ class Head(nn.Module):
 
     def __init__(self, head_size):
         super().__init__()
-        self.key = nn.Linear(n_embd, head_size, bias=False)
-        self.query = nn.Linear(n_embd, head_size, bias=False)
+        self.key = nn.Linear(n_embd, head_size, bias=False) # each element in the embedding has a key that says "i have this data" (ELI5)
+        self.query = nn.Linear(n_embd, head_size, bias=False) # each element in the embedding has a query that says "i am looking for this data" (ELI5)
         self.value = nn.Linear(n_embd, head_size, bias=False)
-        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
+        self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size))) # fast way to calculate the triangular mask
 
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(dropout) # randomly zero out some inputs to prevent overfitting
 
     def forward(self, x):
         # input of size (batch, time-step, channels)
@@ -81,22 +81,32 @@ class Head(nn.Module):
         k = self.key(x)   # (B,T,hs)
         q = self.query(x) # (B,T,hs)
         # compute attention scores ("affinities")
+
+        # query-key dot product scaled by the square root of head size to make stdev and mean look normal
         wei = q @ k.transpose(-2,-1) * k.shape[-1]**-0.5 # (B, T, hs) @ (B, hs, T) -> (B, T, T)
+
+        # mask out the upper triangular part of the matrix
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf')) # (B, T, T)
+        # exponentiate and normalize to get weights
+        # weights are the affinities between the query and the key
         wei = F.softmax(wei, dim=-1) # (B, T, T)
+
+        # apply dropout to the weights
         wei = self.dropout(wei)
         # perform the weighted aggregation of the values
-        v = self.value(x) # (B,T,hs)
+        v = self.value(x) # (B,T,hs) instead of (B,T,C) 
         out = wei @ v # (B, T, T) @ (B, T, hs) -> (B, T, hs)
         return out
 
 class MultiHeadAttention(nn.Module):
     """ multiple heads of self-attention in parallel """
+    # multiple heads let the model attend to different parts of the input
+    # and also go faster because we can do the computation in parallel
 
     def __init__(self, num_heads, head_size):
         super().__init__()
         self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
-        self.proj = nn.Linear(head_size * num_heads, n_embd)
+        self.proj = nn.Linear(head_size * num_heads, n_embd) # each head will have head_size outputs, and we need to convert them back to embedding size
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x):
@@ -106,14 +116,15 @@ class MultiHeadAttention(nn.Module):
 
 class FeedFoward(nn.Module):
     """ a simple linear layer followed by a non-linearity """
+    # this apparently makes it easier to track complex relationships
 
     def __init__(self, n_embd):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd),
-            nn.ReLU(),
-            nn.Linear(4 * n_embd, n_embd),
-            nn.Dropout(dropout),
+            nn.Linear(n_embd, 4 * n_embd), # blow up inputs
+            nn.ReLU(), # non-linearity
+            nn.Linear(4 * n_embd, n_embd), # project back to embedding size
+            nn.Dropout(dropout), # zero out some inputs
         )
 
     def forward(self, x):
@@ -128,8 +139,8 @@ class Block(nn.Module):
         head_size = n_embd // n_head
         self.sa = MultiHeadAttention(n_head, head_size)
         self.ffwd = FeedFoward(n_embd)
-        self.ln1 = nn.LayerNorm(n_embd)
-        self.ln2 = nn.LayerNorm(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd) # analogous to batch norm, but for the embedding dimension
+        self.ln2 = nn.LayerNorm(n_embd) # better because it doesn't create dependence between inputs
 
     def forward(self, x):
         x = x + self.sa(self.ln1(x))
@@ -141,11 +152,11 @@ class GPTLanguageModel(nn.Module):
     def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd) # create embedding table for each char
+        self.position_embedding_table = nn.Embedding(block_size, n_embd) # create embedding for each position (1->block_size) i.e. the model will learn the importance of each position in the sequence
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)]) # stack of transformer blocks defined above
         self.ln_f = nn.LayerNorm(n_embd) # final layer norm
-        self.lm_head = nn.Linear(n_embd, vocab_size)
+        self.lm_head = nn.Linear(n_embd, vocab_size) # final linear layer to convert back to the probability of each char in vocab
 
         # better init, not covered in the original GPT video, but important, will cover in followup video
         self.apply(self._init_weights)
@@ -161,6 +172,7 @@ class GPTLanguageModel(nn.Module):
     def forward(self, idx, targets=None):
         B, T = idx.shape
 
+        # run the inputs through the network and get logits (probabilities of next token being each item in vocab)
         # idx and targets are both (B,T) tensor of integers
         tok_emb = self.token_embedding_table(idx) # (B,T,C)
         pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
@@ -169,6 +181,7 @@ class GPTLanguageModel(nn.Module):
         x = self.ln_f(x) # (B,T,C)
         logits = self.lm_head(x) # (B,T,vocab_size)
 
+        # if we're training, compute the loss, otherwise, no need
         if targets is None:
             loss = None
         else:
@@ -179,6 +192,7 @@ class GPTLanguageModel(nn.Module):
 
         return logits, loss
 
+    # generate text of a given length from a given prompt
     def generate(self, idx, max_new_tokens):
         # idx is (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
@@ -196,10 +210,10 @@ class GPTLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
 
-t1 = time.time()
+t1 = time.time() # track how long this takes
 
 model = GPTLanguageModel()
-m = model.to(device)
+m = model.to(device) # send the model to the device defined above (for me that's the MPS apple silicon)
 # print the number of parameters in the model
 print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
 
@@ -232,5 +246,12 @@ context = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
 #open('more.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
 
+# print how long it took
 t2 = time.time()
 print(f"took {t2 - t1:.2f} seconds")
+
+### RESULTS ###
+# 10M parameters
+# train loss 0.8535, val loss 1.5677
+# validation loss flattened off much before the 5000th iter (my terminal logs only go back to 3500, but that's got train loss 1.0086, val loss 1.4979)
+# took about 3.5hrs on 16GB M1 Pro
